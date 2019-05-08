@@ -1,0 +1,205 @@
+---
+title: "NFL Stats"
+author: "Michael Metzler"
+date: "4/24/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width = 12, fig.height = 6, tidy = "styler", df.print = knitr::kable)
+```
+
+# NFL Stats
+
+## Load Libraries
+
+```{r message=FALSE}
+library(tidyverse)
+```
+
+## Load the Data
+
+```{r}
+df <- feather::read_feather("C:/datasets/NFL/NFL_pbp_2009_2018.feather")
+```
+
+## Data Structure
+
+```{r, message=FALSE, warning=FALSE}
+skimr::skim_to_wide(df) %>% DT::datatable() %>% widgetframe::frameWidget()
+```
+
+## Game Results
+
+```{r}
+game_results <- df %>%
+  group_by(game_id, game_date, home_team, away_team) %>%
+  summarise(
+    home_score = last(total_home_score),
+    away_score = last(total_away_score)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    winner_side = case_when(
+      home_score == away_score ~ "TIE",
+      home_score > away_score ~ "HOME",
+      away_score > home_score ~ "AWAY",
+      TRUE ~ "something is very wrong"
+    ),
+    winner = case_when(
+      winner_side == "TIE" ~ NA_character_,
+      winner_side == "HOME" ~ as.character(home_team),
+      winner_side == "AWAY" ~ as.character(away_team),
+      TRUE ~ "something is very wrong"
+    ),
+    loser = case_when(
+      winner_side == "TIE" ~ NA_character_,
+      winner_side == "HOME" ~ as.character(away_team),
+      winner_side == "AWAY" ~ as.character(home_team),
+      TRUE ~ "something is very wrong"
+    )
+  )
+```
+
+```{r}
+game_results %>%
+  rowwise() %>%
+  mutate(
+    winning_score = max(home_score, away_score),
+    losing_score = min(home_score, away_score)
+  ) %>%
+  ungroup() %>%
+  select(winning_score, losing_score) %>%
+  summarise_all(mean) %>%
+  knitr::kable()
+```
+
+```{r}
+game_results %>%
+  count(winner_side) %>%
+  rename(games_won = n) %>%
+  mutate(percentage = games_won / sum(games_won)) %>%
+  arrange(desc(games_won)) %>%
+  knitr::kable()
+```
+
+```{r}
+game_results %>%
+  select(home_score, away_score) %>%
+  summarise_all(mean) %>% 
+  knitr::kable()
+```
+
+```{r}
+team_wins <- game_results %>%
+  filter(!is.na(winner)) %>%
+  count(winner) %>%
+  rename(wins = n)
+team_losses <- game_results %>%
+  filter(!is.na(loser)) %>%
+  count(loser) %>%
+  rename(losses = n)
+team_ties <- game_results %>%
+  filter(winner_side == "TIE") %>%
+  select(
+    home_team,
+    away_team
+  ) %>%
+  gather(key = team_type, value = team, home_team, away_team) %>%
+  count(team) %>%
+  rename(ties = n)
+team_record <- full_join(team_wins, team_losses, by = c(winner = "loser")) %>%
+  rename(team = winner) %>%
+  full_join(team_ties, by = "team") %>%
+  replace_na(list(
+    wins = 0,
+    losses = 0, ties = 0
+  )) %>%
+  mutate(record = (wins + .5 * ties) / (wins + losses + ties))
+team_record %>% arrange(desc(record)) %>% DT::datatable() %>% widgetframe::frameWidget()
+```
+
+## Crunch Time Passers
+
+```{r}
+crunch_time_passers <- df %>%
+  filter(pass_attempt, quarter >= 4, abs(score_differential) <= 8) %>%
+  group_by(passer_player_name) %>%
+  summarize(
+    attempts = n(),
+    yards = sum(yards_gained, na.rm = TRUE),
+    average_yards = mean(yards_gained),
+    touchdowns = sum(pass_touchdown),
+    interceptions = sum(interception)
+  ) %>%
+  filter(attempts > 100) %>%
+  rename(passer = passer_player_name) %>%
+  arrange(desc(touchdowns / attempts))
+crunch_time_passers %>% DT::datatable() %>% widgetframe::frameWidget()
+```
+
+## Passing Leaders
+
+```{r message=FALSE}
+passing_race <- df %>%
+  filter(pass_attempt) %>%
+  group_by(game_date, passer_player_name) %>%
+  summarise(
+    attempts = n(),
+    yards = sum(yards_gained, na.rm = TRUE),
+    touchdowns = sum(pass_touchdown),
+    interceptions = sum(interception)
+  ) %>%
+  ungroup() %>%
+  group_by(passer_player_name) %>%
+  arrange(game_date) %>%
+  mutate(
+    attempts = cumsum(attempts),
+    yards = cumsum(yards),
+    touchdowns = cumsum(touchdowns),
+    interceptions = cumsum(interceptions)
+  ) %>%
+  ungroup()
+date_ids <- passing_race %>%
+  select(game_date) %>%
+  unique() %>%
+  arrange() %>%
+  mutate(date_id = n())
+passing_race <- passing_race %>%
+  full_join(date_ids)
+top_passers <- passing_race %>%
+  group_by(passer_player_name) %>%
+  summarise(total_yards = last(yards)) %>%
+  arrange(desc(total_yards)) %>%
+  rename(passer_name = passer_player_name)
+```
+
+```{r}
+passer_plot <- ggplot(
+  data = passing_race %>% 
+    filter(
+      passer_player_name %in% (top_passers %>%
+                                      pull(passer_name) %>%
+                                      magrittr::extract(1:30)
+                               )
+      ) %>%
+    rename(Name = passer_player_name, Date = game_date, Yards = yards)
+  ) +
+  geom_line(
+    aes(
+      x = Date,
+      y = Yards,
+      color = Name
+      )
+    ) +
+  theme(
+    plot.title = element_text(size = 24, vjust = .5, hjust = .5),
+    axis.title = element_text(size = 16, hjust = .5, vjust = .5),
+    panel.background = element_rect(fill = "white"),
+    legend.position = "none",
+    panel.grid.major.y = element_line(color = "grey75", size = .1, linetype = "solid")
+  ) +
+  ggtitle("NFL Passing Leaders since 2009")
+plotly::ggplotly(passer_plot) %>% widgetframe::frameWidget()
+```
+
